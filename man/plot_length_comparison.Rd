@@ -7,15 +7,15 @@
 plot_length_comparison(
   hits,
   phenotypes = c(control = "control", experimental = "case"),
-  mode = c("protein", "transcript")[1],
+  mode = c("protein", "transcript"),
   output_file = NULL
 )
 }
 \arguments{
 \item{hits}{`data.frame` or `data.table` containing event-level results,
-including at least `prot_len_inc`, `prot_len_exc`, and `prot_len_diff`
+including at least `prot_len_case`, `prot_len_control`, and `prot_len_diff`
 for `mode = "protein"`, or their transcript analogues
-`tx_len_inc`, `tx_len_exc`, and `tx_len_diff`.}
+`tx_len_case`, `tx_len_control`, and `tx_len_diff`.}
 
 \item{phenotypes}{Named character vector of length 2 giving labels for
 control and experimental phenotypes. Must have names
@@ -46,25 +46,17 @@ Produces three coordinated panels:
 }
 }
 \examples{
-sample_frame <- data.frame(path = c(check_extdata_dir('rawData/control_S5/'),
-                                    check_extdata_dir('rawData/control_S6/'),
-                                    check_extdata_dir('rawData/control_S7/'),
-                                    check_extdata_dir('rawData/control_S8/'),
-                                    check_extdata_dir('rawData/case_S1/'),
-                                    check_extdata_dir('rawData/case_S2/'),
-                                    check_extdata_dir('rawData/case_S3/'),
-                                    check_extdata_dir('rawData/case_S4/')),
-                           sample_name  = c("S5", "S6", "S7", "S8", "S1", "S2", "S3", "S4"),
-                           condition    = c("control", "control", "control", "control", "case",  "case",  "case",  "case"),
-                           stringsAsFactors = FALSE)
+ex <- load_example_data("sample_frame")
+sample_frame <- ex$sample_frame
 hit_index <- get_hitindex(sample_frame)
 res <- get_differential_inclusion(hit_index)
-annotation_df <- get_annotation(load = "test")
+annotation_df <- load_example_data("annotation_df")$annotation_df
 matched <- get_matched_events_chunked(res, annotation_df$annotations, chunk_size = 2000)
 x_seq <- attach_sequences(matched, annotation_df$sequences)
 pairs <- get_pairs(x_seq, source="multi")
 seq_compare <-compare_sequence_frame(pairs, annotation_df$annotations)
 proximal_output <- plot_length_comparison(seq_compare)
+print(proximal_output)
 
 }
 \seealso{

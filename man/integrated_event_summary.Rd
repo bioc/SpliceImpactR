@@ -7,12 +7,14 @@
 integrated_event_summary(hits, pre_filter_hits)
 }
 \arguments{
-\item{hits}{`data.frame` or `data.table` output from [`compare_sequence_frame()`],
+\item{hits}{`data.frame`, `data.table`, or `SpliceImpactResult` output from
+[`compare_sequence_frame()`],
 containing per-event alignment and domain information (e.g. `summary_classification`,
-`prot_pid`, `event_type_inc`, `inc_only_n`, `exc_only_n`, etc.).}
+`prot_score`, `event_type`, `case_only_n`, `control_only_n`, etc.).}
 
-\item{pre_filter_hits}{`data.frame` or `data.table` representing the unfiltered
-input events (e.g. raw differential inclusion table prior to sequence comparison).}
+\item{pre_filter_hits}{`data.frame`, `data.table`, or `SpliceImpactResult`
+representing the unfiltered input events (e.g. raw differential inclusion
+table prior to sequence comparison).}
 }
 \value{
 A named list with:
@@ -36,44 +38,31 @@ The function integrates multiple layers of event-level characterization:
 \itemize{
   \item Event-type composition and class proportions
   \item Protein alignment quality distribution
-  \item Domain-change prevalence (INC/EXC/both)
-  \item Gene and domain cross-event intersections (UpSet plots)
+  \item Domain-change prevalence (case/control/both)
   \item Event-type coordination heatmap (Jaccard similarity across genes)
   \item Relative event retention pre- vs post-filtering
 }
 }
 \examples{
-sample_frame <- data.frame(path = c(check_extdata_dir('rawData/control_S5/'),
-                                    check_extdata_dir('rawData/control_S6/'),
-                                    check_extdata_dir('rawData/control_S7/'),
-                                    check_extdata_dir('rawData/control_S8/'),
-                                    check_extdata_dir('rawData/case_S1/'),
-                                    check_extdata_dir('rawData/case_S2/'),
-                                    check_extdata_dir('rawData/case_S3/'),
-                                    check_extdata_dir('rawData/case_S4/')),
-                           sample_name  = c("S5", "S6", "S7", "S8", "S1", "S2", "S3", "S4"),
-                           condition    = c("control", "control", "control", "control", "case",  "case",  "case",  "case"),
-                           stringsAsFactors = FALSE)
+ex <- load_example_data("sample_frame")
+sample_frame <- ex$sample_frame
 hit_index <- get_hitindex(sample_frame)
 res <- get_differential_inclusion(hit_index)
-annotation_df <- get_annotation(load = "test")
+annotation_df <- load_example_data("annotation_df")$annotation_df
 matched <- get_matched_events_chunked(res, annotation_df$annotations, chunk_size = 2000)
 x_seq <- attach_sequences(matched, annotation_df$sequences)
 pairs <- get_pairs(x_seq, source="multi")
 seq_compare <-compare_sequence_frame(pairs, annotation_df$annotations)
 annotation_df <- get_annotation(load = 'test')
-interpro_features <- get_protein_features(c("interpro"), annotations$annotations, timeout = 600, test = TRUE)
+interpro_features <- get_protein_features(c("interpro"), annotation_df$annotations, timeout = 600, test = TRUE)
 protein_feature_total <- get_comprehensive_annotations(list(interpro_features))
 
 exon_features <- get_exon_features(annotation_df$annotations, protein_feature_total)
 
 hits_domain <- get_domains(seq_compare, exon_features)
-ppidm <- get_ppidm(test=TRUE)
-
-restrict_protein_features <- protein_feature_total[ensembl_transcript_id \%in\%
-                                                     c(hits_domain$transcript_id_exc, hits_domain$transcript_id_exc)]
-ppi <- get_isoform_interactions(restrict_protein_features, ppidm, save = FALSE, load_dir = NULL, init = TRUE)
-hits_final <- get_ppi_switches(hits_domain, ppi)
+ppi <- get_ppi_interactions()             
+hits_final <- get_ppi_switches(hits_domain, ppi, protein_feature_total)
 int_summary <- integrated_event_summary(hits_final, res)
+print(int_summary)
 
 }

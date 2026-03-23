@@ -1,3 +1,136 @@
+#' Visualize PSI values for a single splicing event
+#'
+#' @description
+#' Creates a per-event PSI summary across samples. For **AFE** and **ALE**
+#' events, the plot separates PSI by `inc` entry to distinguish alternative
+#' terminal exons; other event types are summarized by `event_id`.
+#'
+#' @param data `data.frame` or `data.table` containing at least the columns
+#'   `event_id`, `event_type`, `psi`, `condition`, and `sample`. For terminal
+#'   events, an `inc` column is also required.
+#' @param event Character scalar specifying the `event_id` to visualize.
+#' @param fill_zeros Logical indicating whether to fill missing PSI values
+#'   with zeros for samples that contain any observation of the event
+#'   (default: `TRUE`).
+#'
+#' @return A list with elements:
+#' \itemize{
+#'   \item `plot`: `ggplot` box/point plot of PSI per sample group.
+#'   \item `data`: `data.table` used to build the plot.
+#' }
+#'
+#' @examples
+#' ex <- load_example_data("sample_frame")
+#' sample_frame <- ex$sample_frame
+#' hit_index <- get_hitindex(sample_frame)
+#' res <- get_differential_inclusion(hit_index)
+#' event_probe <- "ENSG00000117632:AFE"
+#' probe_individual_event(hit_index, event = event_probe)
+#'
+#' @importFrom data.table setnames CJ 
+#' @importFrom ggplot2 ggplot aes geom_boxplot geom_point labs theme_minimal
+#'   scale_y_continuous position_dodge position_jitterdodge
+#' @export
+probe_individual_event <- function(data, event, fill_zeros = TRUE) {
+  .spi_in <- .resolve_splice_input(data, what = "raw_events")
+  dt <- data.table::as.data.table(.spi_in$dt)
+  
+  required_cols <- c("event_id", "event_type", "psi", "condition", "sample", "form")
+  if (!all(required_cols %in% names(dt))) {
+    stop("Missing required columns: ", paste(setdiff(required_cols, names(dt)), collapse = ", "))
+  }
+  
+  df <- dt[event_id == event]
+  if (!nrow(df)) {
+    stop("No rows found for event_id = '", event, "'.")
+  }
+  
+  event_type <- unique(df$event_type)
+  if (length(event_type) > 1) {
+    warning("Multiple event_type values found; using the first: ", event_type[1])
+  }
+  
+  grouping_col <- if (event_type[1] %chin% c("AFE", "ALE")) "inc" else "event_id"
+  
+  if (grouping_col == "inc" && !"inc" %in% names(df)) {
+    stop("Column 'inc' is required to plot terminal exon events.")
+  }
+  
+  grouping_values <- if (grouping_col == "inc") unique(df[[grouping_col]]) else event
+  
+  x <- df[, .(psi = suppressWarnings(as.numeric(psi)), condition, sample, form, grouping = get(grouping_col))]
+  setnames(x, "grouping", grouping_col)
+  
+  if (fill_zeros) {
+    all_samples <- unique(dt[, .(sample, condition)])
+    samples_to_keep <- x[, .(has_value = any(!is.na(psi))), by = sample][has_value == TRUE, sample]
+    
+    if (length(samples_to_keep)) {
+      all_samples <- all_samples[sample %in% samples_to_keep]
+    }
+    
+    template <- CJ(temp_group = grouping_values, sample = all_samples$sample)
+    setnames(template, "temp_group", grouping_col)
+    template <- template[all_samples, on = .(sample)]
+    
+    x <- template[x, on = c("sample", grouping_col)]
+    x[!is.finite(psi), psi := 0]
+  } else {
+    x <- x[is.finite(psi)]
+  }
+  
+  plot_data <- data.table::copy(x)
+  setnames(plot_data, grouping_col, "event_group")
+  
+  if (event_type %in% c("SE", "MXE", "A5SS", "A3SS", "RI")) {
+    plot_data <- plot_data[form == "INC"]
+  }
+
+  # Enrich title/subtitle with event context to make quick inspection easier.
+  uniq_chr <- if ("chr" %in% names(df)) unique(na.omit(as.character(df$chr))) else character()
+  uniq_strand <- if ("strand" %in% names(df)) unique(na.omit(as.character(df$strand))) else character()
+  uniq_gene <- if ("gene_id" %in% names(df)) unique(na.omit(as.character(df$gene_id))) else character()
+  uniq_inc <- if ("inc" %in% names(df)) unique(na.omit(as.character(df$inc))) else character()
+  uniq_exc <- if ("exc" %in% names(df)) unique(na.omit(as.character(df$exc))) else character()
+
+  short_inc <- paste(utils::head(uniq_inc[nzchar(uniq_inc)], 2), collapse = " | ")
+  short_exc <- paste(utils::head(uniq_exc[nzchar(uniq_exc)], 2), collapse = " | ")
+  coord_bits <- c(
+    if (nzchar(short_inc)) paste0("inc: ", short_inc) else NULL,
+    if (nzchar(short_exc)) paste0("exc: ", short_exc) else NULL
+  )
+  subtitle_bits <- c(
+    if (length(uniq_gene)) paste0("gene: ", uniq_gene[1]) else NULL,
+    if (length(uniq_chr)) paste0("chr: ", uniq_chr[1]) else NULL,
+    if (length(uniq_strand)) paste0("strand: ", uniq_strand[1]) else NULL,
+    if (length(coord_bits)) paste(coord_bits, collapse = " ; ") else NULL
+  )
+  subtitle_text <- paste(subtitle_bits, collapse = " | ")
+
+  x_lab <- if (identical(grouping_col, "inc")) "Inclusion coordinate group" else "Event"
+  
+  p <- ggplot(plot_data, aes(x = event_group, y = psi)) +
+    geom_boxplot(aes(fill = condition), position = position_dodge(width = 0.8)) +
+    geom_point(aes(color = condition),
+               position = position_jitterdodge(dodge.width = 0.8),
+               alpha = 0.6) +
+    labs(
+      x = x_lab,
+      y = "PSI (Percent Spliced In)",
+      title = paste("PSI Distribution:", event),
+      subtitle = subtitle_text
+    ) +
+    theme_minimal(base_size = 12) +
+    ggplot2::theme(
+      plot.title = ggplot2::element_text(face = "bold"),
+      axis.text.x = ggplot2::element_text(angle = 18, hjust = 1),
+      legend.position = "top"
+    ) +
+    scale_y_continuous(limits = c(0, 1))
+  
+  return(list(plot = p, data = x))
+}
+
 #' @title Split genomic coordinate strings into integer ranges
 #' @description
 #' Internal helper that converts a string like `"12345-12456"`
@@ -21,7 +154,7 @@
 #'
 #' @details
 #' The function compares the genomic coordinates of the inclusion
-#' (`inc_inc`) and exclusion (`inc_exc`) segments per event:
+#' (`inc_case`) and exclusion (`inc_control`) segments per event:
 #' \itemize{
 #'   \item For **AFE** events, proximal = exon with smaller start
 #'         coordinate on the `+` strand (or larger end on `-` strand).
@@ -36,10 +169,10 @@
 #' @param hits `data.frame` or `data.table` containing at least:
 #'   \itemize{
 #'     \item `event_id`
-#'     \item `event_type_inc`
-#'     \item `strand_inc`
-#'     \item `inc_inc`, `inc_exc`
-#'     \item `delta_psi_inc`, `delta_psi_exc`
+#'     \item `event_type`
+#'     \item `strand`
+#'     \item `inc_case`, `inc_control`
+#'     \item `delta_psi_case`, `delta_psi_control`
 #'   }
 #'
 #' @return A `data.table` identical to `hits` with an additional
@@ -49,28 +182,20 @@
 #' @seealso [plot_prox_dist()]
 #'
 #' @examples
-#' sample_frame <- data.frame(path = c(check_extdata_dir('rawData/control_S5/'),
-#'                                     check_extdata_dir('rawData/control_S6/'),
-#'                                     check_extdata_dir('rawData/control_S7/'),
-#'                                     check_extdata_dir('rawData/control_S8/'),
-#'                                     check_extdata_dir('rawData/case_S1/'),
-#'                                     check_extdata_dir('rawData/case_S2/'),
-#'                                     check_extdata_dir('rawData/case_S3/'),
-#'                                     check_extdata_dir('rawData/case_S4/')),
-#'                            sample_name  = c("S5", "S6", "S7", "S8", "S1", "S2", "S3", "S4"),
-#'                            condition    = c("control", "control", "control", "control", "case",  "case",  "case",  "case"),
-#'                            stringsAsFactors = FALSE)
+#' ex <- load_example_data("sample_frame")
+#' sample_frame <- ex$sample_frame
 #' hit_index <- get_hitindex(sample_frame)
 #' res <- get_differential_inclusion(hit_index)
-#' annotation_df <- get_annotation(load = "test")
+#' annotation_df <- load_example_data("annotation_df")$annotation_df
 #' matched <- get_matched_events_chunked(res, annotation_df$annotations, chunk_size = 2000)
 #' x_seq <- attach_sequences(matched, annotation_df$sequences)
 #' pairs <- get_pairs(x_seq, source="multi")
 #' proximal_output <- get_proximal_shift_from_hits(pairs)
-#' @import data.table
+#' print(proximal_output)
 #' @export
 get_proximal_shift_from_hits <- function(hits) {
-  H <- data.table::as.data.table(hits)[event_type_inc %in% c('AFE', 'ALE'), .(event_id, event_type = event_type_inc, strand = strand_inc, pos = inc_inc, delta_psi_inc, neg = inc_exc, delta_psi_exc)]
+  .spi_in <- .resolve_splice_input(hits, what = "paired_hits")
+  H <- data.table::as.data.table(.spi_in$dt)[event_type %in% c('AFE', 'ALE'), .(event_id, event_type, strand, pos = inc_case, delta_psi_case, neg = inc_control, delta_psi_control)]
   res <- H[, {
     pos <- .split_coord(pos)
     neg <- .split_coord(neg)
@@ -200,9 +325,9 @@ plot_prox_dist <- function(res) {
 #' }
 #'
 #' @param hits `data.frame` or `data.table` containing event-level results,
-#'   including at least `prot_len_inc`, `prot_len_exc`, and `prot_len_diff`
+#'   including at least `prot_len_case`, `prot_len_control`, and `prot_len_diff`
 #'   for `mode = "protein"`, or their transcript analogues
-#'   `tx_len_inc`, `tx_len_exc`, and `tx_len_diff`.
+#'   `tx_len_case`, `tx_len_control`, and `tx_len_diff`.
 #' @param phenotypes Named character vector of length 2 giving labels for
 #'   control and experimental phenotypes. Must have names
 #'   `"control"` and `"experimental"`.
@@ -216,25 +341,17 @@ plot_prox_dist <- function(res) {
 #' paired boxplots, delta-length density, and protein-coding class distribution.
 #'
 #' @examples
-#' sample_frame <- data.frame(path = c(check_extdata_dir('rawData/control_S5/'),
-#'                                     check_extdata_dir('rawData/control_S6/'),
-#'                                     check_extdata_dir('rawData/control_S7/'),
-#'                                     check_extdata_dir('rawData/control_S8/'),
-#'                                     check_extdata_dir('rawData/case_S1/'),
-#'                                     check_extdata_dir('rawData/case_S2/'),
-#'                                     check_extdata_dir('rawData/case_S3/'),
-#'                                     check_extdata_dir('rawData/case_S4/')),
-#'                            sample_name  = c("S5", "S6", "S7", "S8", "S1", "S2", "S3", "S4"),
-#'                            condition    = c("control", "control", "control", "control", "case",  "case",  "case",  "case"),
-#'                            stringsAsFactors = FALSE)
+#' ex <- load_example_data("sample_frame")
+#' sample_frame <- ex$sample_frame
 #' hit_index <- get_hitindex(sample_frame)
 #' res <- get_differential_inclusion(hit_index)
-#' annotation_df <- get_annotation(load = "test")
+#' annotation_df <- load_example_data("annotation_df")$annotation_df
 #' matched <- get_matched_events_chunked(res, annotation_df$annotations, chunk_size = 2000)
 #' x_seq <- attach_sequences(matched, annotation_df$sequences)
 #' pairs <- get_pairs(x_seq, source="multi")
 #' seq_compare <-compare_sequence_frame(pairs, annotation_df$annotations)
 #' proximal_output <- plot_length_comparison(seq_compare)
+#' print(proximal_output)
 #'
 #' @seealso [plot_alignment_summary()]
 #'
@@ -249,19 +366,20 @@ plot_prox_dist <- function(res) {
 plot_length_comparison <- function(
     hits,
     phenotypes = c(control = "control", experimental = "case"),
-    mode = c("protein", "transcript")[1],
+    mode = c("protein", "transcript"),
     output_file = NULL
 ) {
   stopifnot(length(phenotypes) == 2, all(c("control","experimental") %in% names(phenotypes)))
   mode <- match.arg(mode)
 
-  H <- as.data.table(hits)
+  .spi_in <- .resolve_splice_input(hits, what = "paired_hits")
+  H <- as.data.table(.spi_in$dt)
 
   # ---- choose columns --------------------------------------------------------
   if (mode == "protein") {
-    cols <- c(inc = "prot_len_inc", exc = "prot_len_exc", diff = "prot_len_diff")
+    cols <- c(inc = "prot_len_case", exc = "prot_len_control", diff = "prot_len_diff")
   } else {
-    cols <- c(inc = "tx_len_inc",   exc = "tx_len_exc",   diff = "tx_len_diff")
+    cols <- c(inc = "tx_len_case",   exc = "tx_len_control",   diff = "tx_len_diff")
   }
   if (!all(cols %in% names(H))) {
     stop("Missing required columns for mode='", mode, "'. Looking for: ",
@@ -357,9 +475,16 @@ plot_length_comparison <- function(
   p_density <- ggplot(Ddiff, aes(diff)) +
     geom_density(fill = "#7F5A83", alpha = 0.5, color = "black") +
     geom_vline(xintercept = 0, linetype = "dashed") +
-    labs(x = sprintf("delta %s Length (INC - EXC)", tools::toTitleCase(mode)),
+    labs(
+      x = sprintf(
+        "delta %s Length (%s - %s)",
+        tools::toTitleCase(mode),
+        phenotypes[["experimental"]],
+        phenotypes[["control"]]
+      ),
          y = "Density",
-         title = NULL) +
+      title = NULL
+    ) +
     theme_bw(base_size = 12)
 
   # ---- plot 3: coding-class counts ------------------------------------------
@@ -419,25 +544,17 @@ plot_length_comparison <- function(
 #' alignment identity scores.
 #'
 #' @examples
-#' sample_frame <- data.frame(path = c(check_extdata_dir('rawData/control_S5/'),
-#'                                     check_extdata_dir('rawData/control_S6/'),
-#'                                     check_extdata_dir('rawData/control_S7/'),
-#'                                     check_extdata_dir('rawData/control_S8/'),
-#'                                     check_extdata_dir('rawData/case_S1/'),
-#'                                     check_extdata_dir('rawData/case_S2/'),
-#'                                     check_extdata_dir('rawData/case_S3/'),
-#'                                     check_extdata_dir('rawData/case_S4/')),
-#'                            sample_name  = c("S5", "S6", "S7", "S8", "S1", "S2", "S3", "S4"),
-#'                            condition    = c("control", "control", "control", "control", "case",  "case",  "case",  "case"),
-#'                            stringsAsFactors = FALSE)
+#' ex <- load_example_data("sample_frame")
+#' sample_frame <- ex$sample_frame
 #' hit_index <- get_hitindex(sample_frame)
 #' res <- get_differential_inclusion(hit_index)
-#' annotation_df <- get_annotation(load = "test")
+#' annotation_df <- load_example_data("annotation_df")$annotation_df
 #' matched <- get_matched_events_chunked(res, annotation_df$annotations, chunk_size = 2000)
 #' x_seq <- attach_sequences(matched, annotation_df$sequences)
 #' pairs <- get_pairs(x_seq, source="multi")
 #' seq_compare <-compare_sequence_frame(pairs, annotation_df$annotations)
 #' alignment_summary <- plot_alignment_summary(seq_compare)
+#' print(alignment_summary)
 #' @seealso [plot_length_comparison()]
 #'
 #' @import data.table
@@ -447,11 +564,14 @@ plot_length_comparison <- function(
 #' @importFrom ggplot2 facet_wrap
 #' @export
 plot_alignment_summary <- function(hits,
-                                   mode = c("protein", "transcript")[1],
+                                   mode = c("protein", "transcript"),
                                    output_file = NULL) {
+  .spi_in <- .resolve_splice_input(hits, what = "paired_hits")
+  hits <- data.table::as.data.table(.spi_in$dt)
+  mode <- match.arg(mode)
   if (mode == "protein") pid_col <- 'prot_pid' else pid_col <- 'dna_pid'
-  A <- hits[, .(score = get(pid_col), summary_classification, event_type_exc)]
-  C <- A[, .N, by = .(summary_classification, event_type_exc)]
+  A <- hits[, .(score = get(pid_col), summary_classification, event_type)]
+  C <- A[, .N, by = .(summary_classification, event_type)]
   A <- A[!is.na(score)]
 
   lvl <- rev(c("noPC", "onePC", "protein_coding", "FrameShift", "Rescue", "Match") )
@@ -466,14 +586,14 @@ plot_alignment_summary <- function(hits,
     ggplot2::geom_bar(position="stack", stat="identity") +
     ggplot2::scale_fill_manual(values=c('noPC' = "azure4", 'onePC' = "azure2", "Match" = "#E69F00", 'Rescue' = "#56B4E9", 'FrameShift' = "pink", 'protein_coding' = "deeppink4")) +
     ggplot2::theme_classic() + ggplot2::xlab("") + ggplot2::ylab("Count") + theme(axis.ticks.x = element_blank(),axis.text.x = element_blank()) +
-    facet_wrap(~event_type_exc, ncol = 1, scales = 'free_y')
+    facet_wrap(~event_type, ncol = 1, scales = 'free_y')
 
   gdf <- ggplot2::ggplot(A, ggplot2::aes(x = score, fill = summary_classification)) +
     ggplot2::geom_histogram(ggplot2::aes(y=ggplot2::after_stat(count/sum(count))), colour = 1,
                             bins = 20) +
     ggplot2::scale_fill_manual(values=c('noPC' = "azure4", 'onePC' = "azure2", "Match" = "#E69F00", 'Rescue' = "#56B4E9", 'FrameShift' = "pink", 'protein_coding' = "deeppink4")) +
     ggplot2::theme_classic() + ggplot2::xlab("Alignment Score") + ggplot2::ylab("Fraction")+
-    facet_wrap(~event_type_exc, ncol = 1, scales = 'free_y')
+    facet_wrap(~event_type, ncol = 1, scales = 'free_y')
 
   gdf_comp <- ggpubr::ggarrange(propCoding, gdf, nrow = 1, widths = c(1, 3),
                                 common.legend = TRUE)
@@ -577,6 +697,7 @@ getSizeFactors <- function(df) {
       )
       data.table::setDT(exon_file)
       exon_file[, reads := nUP + nDOWN]
+      exon_file <- exon_file[reads > 10]
       exon_file[, .(reads = sum(reads)), by = .(exon)][, sample_name := s]
     }), use.names = TRUE, fill = TRUE)
 
@@ -593,6 +714,7 @@ getSizeFactors <- function(df) {
       if (length(x) == 0) return(NA_real_)
       exp(mean(log(x)))
     }
+    counts_mat <- counts_mat + 1
     geoMean <- apply(counts_mat, 1, gmean)
 
     # Keep informative exons only
@@ -654,21 +776,13 @@ getSizeFactors <- function(df) {
 #' @importFrom patchwork plot_annotation
 #' @importFrom stats wilcox.test ks.test
 #' @examples
-#' sample_frame <- data.frame(path = c(check_extdata_dir('rawData/control_S5/'),
-#'                                     check_extdata_dir('rawData/control_S6/'),
-#'                                     check_extdata_dir('rawData/control_S7/'),
-#'                                     check_extdata_dir('rawData/control_S8/'),
-#'                                     check_extdata_dir('rawData/case_S1/'),
-#'                                     check_extdata_dir('rawData/case_S2/'),
-#'                                     check_extdata_dir('rawData/case_S3/'),
-#'                                     check_extdata_dir('rawData/case_S4/')),
-#'                            sample_name  = c("S5", "S6", "S7", "S8", "S1", "S2", "S3", "S4"),
-#'                            condition    = c("control", "control", "control", "control", "case",  "case",  "case",  "case"),
-#'                            stringsAsFactors = FALSE)
+#' ex <- load_example_data("sample_frame")
+#' sample_frame <- ex$sample_frame
 #' hit_index <- get_hitindex(sample_frame)
-#' ov <- overview_splicing_comparison_fixed(hit_index, sample_frame, 'exon_files')
+#' ov <- overview_spicing_comparison(hit_index, sample_frame, 'exon_files')
+#' print(ov)
 #' @export
-overview_splicing_comparison_fixed <- function(
+overview_spicing_comparison <- function(
     events,
     sample_df,
     depth_norm = c('exon_files', 'user-given'),
@@ -678,7 +792,8 @@ overview_splicing_comparison_fixed <- function(
     output_file = NULL
 ) {
   # ----------------------- validate & normalize -----------------------
-  E <- as.data.table(events)
+  .spi_in <- .resolve_splice_input(events, what = "raw_events")
+  E <- as.data.table(.spi_in$dt)
 
   E <- E[(as.numeric(inclusion_reads) >= minReads | as.numeric(exclusion_reads) >= minReads) & is.finite(psi) & psi >= 0 & psi <= 1]
 
@@ -851,18 +966,10 @@ overview_splicing_comparison_fixed <- function(
 #' @seealso [.getHITindex()]
 #'
 #' @examples
-#' sample_frame <- data.frame(path = c(check_extdata_dir('rawData/control_S5/'),
-#'                                     check_extdata_dir('rawData/control_S6/'),
-#'                                     check_extdata_dir('rawData/control_S7/'),
-#'                                     check_extdata_dir('rawData/control_S8/'),
-#'                                     check_extdata_dir('rawData/case_S1/'),
-#'                                     check_extdata_dir('rawData/case_S2/'),
-#'                                     check_extdata_dir('rawData/case_S3/'),
-#'                                     check_extdata_dir('rawData/case_S4/')),
-#'                            sample_name  = c("S5", "S6", "S7", "S8", "S1", "S2", "S3", "S4"),
-#'                            condition    = c("control", "control", "control", "control", "case",  "case",  "case",  "case"),
-#'                            stringsAsFactors = FALSE)
+#' ex <- load_example_data("sample_frame")
+#' sample_frame <- ex$sample_frame
 #' hit_compare <- compare_hit_index(sample_frame, condition_map = c(control = "control", test = "case"))
+#' print(hit_compare)
 #' @import data.table
 #' @importFrom ggplot2 ggplot aes geom_point scale_color_gradient geom_abline
 #'   labs theme_minimal element_text geom_tile scale_fill_gradientn
@@ -879,8 +986,27 @@ compare_hit_index <- function(
     sig_delta = 0.2,
     fdr_thresh = 0.05
 ) {
+  DT <- NULL
+  if (methods::is(sample_df, "SpliceImpactResult")) {
+    s4_sample_frame <- as_dt_from_s4(sample_df, slot = "sample_frame")
+    if (nrow(s4_sample_frame)) {
+      sample_df <- s4_sample_frame
+    } else {
+      raw_dt <- as_dt_from_s4(sample_df, slot = "raw_events")
+      hit_cols <- c("gene", "exon", "HITindex", "sample", "condition")
+      if (all(hit_cols %in% names(raw_dt))) {
+        DT <- data.table::as.data.table(raw_dt)[, .(gene, exon, HITindex, sample, condition)]
+      } else if (!is.null(sample_df@metadata$sample_df)) {
+        sample_df <- sample_df@metadata$sample_df
+      } else {
+        stop("compare_hit_index: SpliceImpactResult input requires either `sample_frame` slot (`path`, `sample_name`, `condition`), HITindex columns in raw_events (`gene`, `exon`, `HITindex`, `sample`, `condition`), or `obj@metadata$sample_df`.")
+      }
+    }
+  }
 
-  DT <- .getHITindex(sample_df)
+  if (is.null(DT)) {
+    DT <- .getHITindex(sample_df)
+  }
 
   # event key
   DT[, event_key := do.call(paste, c(.SD, list(sep="|"))), .SDcols = c("gene", "exon")]
@@ -972,8 +1098,8 @@ compare_hit_index <- function(
     scale_color_gradient(low = "white", high = "red",
                          name = expression(paste("|", Delta, " HIT|"))) +
     geom_abline(slope = 1, intercept = 0, linetype = "dashed") +
-    labs(x = "Average HIT (Control)", y = "Average HIT (Test)",
-         title = "Control vs Test Mean HIT") +
+    labs(x = "Average HIT (Control)", y = "Average HIT (Case)",
+         title = "Control vs Case Mean HIT") +
     theme_minimal() +
     theme(plot.title = element_text(hjust = 0.5))
 
@@ -1013,7 +1139,7 @@ compare_hit_index <- function(
     geom_density(fill = "deeppink4", alpha = .3) +
     geom_rug(alpha = .15) +
     geom_vline(xintercept = 0, linetype = "dashed") +
-    labs(x = expression(Delta~"HIT (Test - Control)"), y = "Density",
+    labs(x = expression(Delta~"HIT (Case - Control)"), y = "Density",
          title = expression(Delta~"HIT distribution")) +
     theme_minimal() +
     theme(plot.title = element_text(hjust = 0.5))
@@ -1037,19 +1163,20 @@ compare_hit_index <- function(
 #' Integrates results from [`compare_sequence_frame()`] with pre-filter event tables
 #' to display pre- vs post-filter usage, event coordination, and gene/domain overlaps.
 #'
-#' @param hits `data.frame` or `data.table` output from [`compare_sequence_frame()`],
+#' @param hits `data.frame`, `data.table`, or `SpliceImpactResult` output from
+#'   [`compare_sequence_frame()`],
 #'   containing per-event alignment and domain information (e.g. `summary_classification`,
-#'   `prot_pid`, `event_type_inc`, `inc_only_n`, `exc_only_n`, etc.).
-#' @param pre_filter_hits `data.frame` or `data.table` representing the unfiltered
-#'   input events (e.g. raw differential inclusion table prior to sequence comparison).
+#'   `prot_score`, `event_type`, `case_only_n`, `control_only_n`, etc.).
+#' @param pre_filter_hits `data.frame`, `data.table`, or `SpliceImpactResult`
+#'   representing the unfiltered input events (e.g. raw differential inclusion
+#'   table prior to sequence comparison).
 #'
 #' @details
 #' The function integrates multiple layers of event-level characterization:
 #' \itemize{
 #'   \item Event-type composition and class proportions
 #'   \item Protein alignment quality distribution
-#'   \item Domain-change prevalence (INC/EXC/both)
-#'   \item Gene and domain cross-event intersections (UpSet plots)
+#'   \item Domain-change prevalence (case/control/both)
 #'   \item Event-type coordination heatmap (Jaccard similarity across genes)
 #'   \item Relative event retention pre- vs post-filtering
 #' }
@@ -1064,38 +1191,26 @@ compare_hit_index <- function(
 #' }
 #'
 #' @examples
-#' sample_frame <- data.frame(path = c(check_extdata_dir('rawData/control_S5/'),
-#'                                     check_extdata_dir('rawData/control_S6/'),
-#'                                     check_extdata_dir('rawData/control_S7/'),
-#'                                     check_extdata_dir('rawData/control_S8/'),
-#'                                     check_extdata_dir('rawData/case_S1/'),
-#'                                     check_extdata_dir('rawData/case_S2/'),
-#'                                     check_extdata_dir('rawData/case_S3/'),
-#'                                     check_extdata_dir('rawData/case_S4/')),
-#'                            sample_name  = c("S5", "S6", "S7", "S8", "S1", "S2", "S3", "S4"),
-#'                            condition    = c("control", "control", "control", "control", "case",  "case",  "case",  "case"),
-#'                            stringsAsFactors = FALSE)
+#' ex <- load_example_data("sample_frame")
+#' sample_frame <- ex$sample_frame
 #' hit_index <- get_hitindex(sample_frame)
 #' res <- get_differential_inclusion(hit_index)
-#' annotation_df <- get_annotation(load = "test")
+#' annotation_df <- load_example_data("annotation_df")$annotation_df
 #' matched <- get_matched_events_chunked(res, annotation_df$annotations, chunk_size = 2000)
 #' x_seq <- attach_sequences(matched, annotation_df$sequences)
 #' pairs <- get_pairs(x_seq, source="multi")
 #' seq_compare <-compare_sequence_frame(pairs, annotation_df$annotations)
 #' annotation_df <- get_annotation(load = 'test')
-#' interpro_features <- get_protein_features(c("interpro"), annotations$annotations, timeout = 600, test = TRUE)
+#' interpro_features <- get_protein_features(c("interpro"), annotation_df$annotations, timeout = 600, test = TRUE)
 #' protein_feature_total <- get_comprehensive_annotations(list(interpro_features))
 #'
 #' exon_features <- get_exon_features(annotation_df$annotations, protein_feature_total)
 #'
 #' hits_domain <- get_domains(seq_compare, exon_features)
-#' ppidm <- get_ppidm(test=TRUE)
-#'
-#' restrict_protein_features <- protein_feature_total[ensembl_transcript_id %in%
-#'                                                      c(hits_domain$transcript_id_exc, hits_domain$transcript_id_exc)]
-#' ppi <- get_isoform_interactions(restrict_protein_features, ppidm, save = FALSE, load_dir = NULL, init = TRUE)
-#' hits_final <- get_ppi_switches(hits_domain, ppi)
+#' ppi <- get_ppi_interactions()             
+#' hits_final <- get_ppi_switches(hits_domain, ppi, protein_feature_total)
 #' int_summary <- integrated_event_summary(hits_final, res)
+#' print(int_summary)
 #'
 #' @import data.table
 #' @importFrom ggplot2 ggplot aes geom_col geom_violin geom_tile geom_text geom_abline
@@ -1105,16 +1220,16 @@ compare_hit_index <- function(
 #' @importFrom scales percent percent_format rescale
 #' @importFrom stats median quantile
 #' @importFrom ggplot2 stat_summary ylim xlim
-#' @importFrom ComplexUpset upset upset_set_size intersection_size
 #' @export
 integrated_event_summary <- function(
     hits,
     pre_filter_hits
 ) {
-  DT <- as.data.table(hits)
+  .spi_hits <- .resolve_splice_input(hits, what = "paired_hits")
+  DT <- as.data.table(.spi_hits$dt)
+  .spi_pre <- .resolve_splice_input(pre_filter_hits, what = "di_events")
+  pre_filter_hits <- as.data.table(.spi_pre$dt)
 
-  DT[, event_type := event_type_inc]
-  DT <- DT[!is.na(event_type) & nzchar(event_type)]
 
   DT[, class_raw := as.character(summary_classification)]
   # map any synonyms to our palette keys
@@ -1135,17 +1250,17 @@ integrated_event_summary <- function(
     Rescue       = "#56B4E9"
   )
 
-  DT[, score := as.numeric(prot_pid)]
+  DT[, score := as.numeric(if ("prot_pid" %in% names(DT)) prot_pid else prot_score)]
 
   ## ---------- domain-change fields ----------
   DT[, `:=`(
-    inc_only_flag = as.integer(inc_only_n > 0),
-    exc_only_flag = as.integer(exc_only_n > 0),
-    any_dom_flag  = as.integer((inc_only_n > 0) | (exc_only_n > 0))
+    case_only_flag = as.integer(case_only_n > 0),
+    control_only_flag = as.integer(control_only_n > 0),
+    any_dom_flag  = as.integer((case_only_n > 0) | (control_only_n > 0))
   )]
-  DT[, dom_kind := fifelse(inc_only_flag==1 & exc_only_flag==0, "inc_only",
-                           fifelse(inc_only_flag==0 & exc_only_flag==1, "exc_only",
-                                   fifelse(inc_only_flag==1 & exc_only_flag==1, "both", "none")))]
+  DT[, dom_kind := fifelse(case_only_flag == 1 & control_only_flag == 0, "case_only",
+                           fifelse(case_only_flag == 0 & control_only_flag == 1, "control_only",
+                                   fifelse(case_only_flag == 1 & control_only_flag == 1, "both", "none")))]
 
   ## =====================  summaries  =====================
   by_type <- DT[, .(n = .N), by = event_type][order(-n)]
@@ -1159,17 +1274,17 @@ integrated_event_summary <- function(
   class_props[, summary_classification :=
                 factor(summary_classification, levels = lvl)]
 
-  score_summary <- DT[is.finite(prot_score),
+  score_summary <- DT[is.finite(score),
                       .(n = .N,
-                        median = median(prot_score),
-                        q25 = quantile(prot_score, .25),
-                        q75 = quantile(prot_score, .75)),
+                        median = median(score),
+                        q25 = quantile(score, .25),
+                        q75 = quantile(score, .75)),
                       by = event_type][order(-n)]
 
   dom_prev <- DT[, .(
     prop_any  = mean(any_dom_flag==1, na.rm = TRUE),
-    prop_inc  = mean(dom_kind=="inc_only", na.rm = TRUE),
-    prop_exc  = mean(dom_kind=="exc_only", na.rm = TRUE),
+    prop_case  = mean(dom_kind=="case_only", na.rm = TRUE),
+    prop_control  = mean(dom_kind=="control_only", na.rm = TRUE),
     prop_both = mean(dom_kind=="both",     na.rm = TRUE)
   ), by = event_type]
 
@@ -1183,7 +1298,7 @@ integrated_event_summary <- function(
     scale_y_continuous(labels = percent) +
     labs(x = NULL, y = "Proportion", fill = "Class",
          title = "Event classification by type") +
-    theme_minimal() +
+    theme_minimal(base_size = 13) +
     theme(axis.text.x = element_text(angle = 45, hjust = 1))
 
   # P2: alignment score violin per event type (with median)
@@ -1193,11 +1308,11 @@ integrated_event_summary <- function(
       stat_summary(fun = median, geom = "point", size = 2, color = "deeppink4") +
       labs(x = NULL, y = paste("Protein", "alignment (%)"),
            title = "Alignment score distribution") +
-      theme_minimal() +
+      theme_minimal(base_size = 13) +
       theme(axis.text.x = element_text(angle = 45, hjust = 1))
   } else ggplot() + theme_void() + ggtitle("Alignment scores not available")
 
-  # P3: domain change prevalence (any/inc/exc/both) per type
+  # P3: domain change prevalence (any/case/control/both) per type
   dom_long <- melt(dom_prev, id.vars = "event_type",
                    variable.name = "kind", value.name = "prop")
 
@@ -1206,15 +1321,14 @@ integrated_event_summary <- function(
     scale_y_continuous(labels = percent_format(accuracy = 1)) +
     scale_fill_manual(values = c(
       prop_any  = "cadetblue4",
-      prop_inc  = "deeppink4",
-      prop_exc  = "#56B4E9",
+      prop_case  = "deeppink4",
+      prop_control  = "#56B4E9",
       prop_both = "#E69F00"
-    ), labels = c("Any","INC-only","EXC-only","Both")) +
+    ), labels = c("Any","CASE-only","CONTROL-only","Both")) +
     labs(x = NULL, y = "Proportion", fill = NULL,
          title = "Domain-change prevalence") +
-    theme_minimal() +
+    theme_minimal(base_size = 13) +
     theme(axis.text.x = element_text(angle = 45, hjust = 1))
-  have_upset <- requireNamespace("ComplexUpset", quietly = TRUE)
 
   DT2 <- as.data.table(DT)[pc_class == "protein_coding"]
 
@@ -1230,19 +1344,19 @@ integrated_event_summary <- function(
               vjust = -0.3) +
     labs(y = "Proportion with PPI change", x = "",
          title = "Fraction of events with altered PPIs") +
-    theme_bw(base_size = 12) +
+    theme_bw(base_size = 13) +
     ylim(0, 1)
 
   DT_long <- melt(
     DT2,
     id.vars = "event_type",
-    measure.vars = c("n_inc_ppi", "n_exc_ppi"),
+    measure.vars = c("n_case_ppi", "n_control_ppi"),
     variable.name = "ppi_direction",
     value.name  = "ppi_count"
   )
 
   DT_long[, ppi_direction := factor(ppi_direction,
-                                    labels = c("INC gained","EXC gained"))]
+                                    labels = c("CASE gained","CONTROL gained"))]
 
   ppi2 <- ggplot(DT_long[ppi_count > 0],
                aes(x = event_type, y = ppi_count, color = ppi_direction)) +
@@ -1251,122 +1365,13 @@ integrated_event_summary <- function(
     labs(x = "Event type", y = "# PPI gained",
          title = "PPI gain distributions by event type",
          color = "") +
-    theme_bw(base_size = 12)
+    theme_bw(base_size = 13)
 
-  ## ---------- 1) Gene x Event-Type UpSet ----------
-  # Coalesce gene id (prefers *_inc, falls back to *_exc, then NA removed)
-  gene_col <- c("gene_id_inc","gene_id_exc")[c("gene_id_inc","gene_id_exc") %in% names(DT)][1]
-  if (is.na(gene_col)) {
-    gene_col <- c("gene_id","gene")[c("gene_id","gene") %in% names(DT)][1]
-  }
-  if (!is.na(gene_col)) {
-    G <- unique(DT[!is.na(get(gene_col)) & nzchar(get(gene_col)),
-                   .(gene = as.character(get(gene_col)), event_type)])
-    gene_wide <- dcast(G[, .(present = TRUE), by = .(gene, event_type)],
-                       gene ~ event_type, value.var = "present", fill = FALSE)
-    # Optional: hide hybrid redundancy if both AFE/HFE or ALE/HLE exist for same gene
-    for (pair in list(c("AFE","HFE"), c("ALE","HLE"))) {
-      if (all(pair %in% names(gene_wide))) {
-        gene_wide[[pair[2]]] <- ifelse(gene_wide[[pair[1]]] & gene_wide[[pair[2]]], FALSE, gene_wide[[pair[2]]])
-      }
-    }
-    if (have_upset && ncol(gene_wide) > 2) {
-      # gene_upset <- ComplexUpset::upset(
-      #   gene_wide,
-      #   intersect = setdiff(names(gene_wide), "gene"),
-      #   name = "Gene intersections",
-      #   set_sizes = ComplexUpset::upset_set_size(),
-      #   base_annotations = list(
-      #     'Counts' = ComplexUpset::intersection_size(text = list(size = 3))
-      #   ),
-      #   width_ratio = 0.15
-      # )
-      gene_upset <- ComplexUpset::upset(
-        gene_wide,
-        intersect = setdiff(names(gene_wide), "gene"),
-        name = "Gene intersections",
-        set_sizes = ComplexUpset::upset_set_size(),
-        base_annotations = list(
-          'Counts' = ComplexUpset::intersection_size(text = list(size = 3))
-        ),
-        width_ratio = 0.15,
-        themes = list(
-          # valid ggplot theme for elements upset will override
-          `intersections_matrix` = theme(
-            axis.title.x = element_blank(),
-            axis.title.y = element_blank()
-          )
-        )
-      )
-    } else {
-      gene_upset <- ggplot() + theme_void() + ggtitle("Gene UpSet (ComplexUpset not installed / not enough sets)")
-    }
-  } else {
-    gene_upset <- ggplot() + theme_void() + ggtitle("Gene UpSet (no gene column found)")
-  }
-
-  domain_list_cols <- c("either_domains_list","inc_only_domains_list","exc_only_domains_list")
-  dom_col_present <- domain_list_cols[domain_list_cols %in% names(DT)]
-
-  if (length(dom_col_present)) {
-    # Build a "domain" vector per row (prefers 'either' if present)
-    if ("either_domains_list" %in% dom_col_present) {
-      Dtmp <- DT[, .(event_type,
-                     domain = unlist(either_domains_list, use.names = FALSE)), by = .I]
-    } else {
-      # fallback: union inc-only and exc-only
-      Dtmp <- DT[, {
-        incv <- if ("inc_only_domains_list" %in% dom_col_present) unlist(inc_only_domains_list) else character(0)
-        exec <- if ("exc_only_domains_list" %in% dom_col_present) unlist(exc_only_domains_list) else character(0)
-        list(domain = unique(c(incv, exec)))
-      }, by = .(event_type, .I)]
-    }
-    Dtmp <- Dtmp[!is.na(domain) & nzchar(domain)]
-    if (nrow(Dtmp)) {
-      Dwide <- dcast(unique(Dtmp[, .(domain, event_type, present = TRUE)]),
-                     domain ~ event_type, value.var = "present", fill = FALSE)
-      if (have_upset && ncol(Dwide) > 2) {
-        domain_upset <- ComplexUpset::upset(
-          Dwide,
-          intersect = setdiff(names(Dwide), "gene"),
-          name = "Domain intersections",
-          set_sizes = ComplexUpset::upset_set_size(),
-          base_annotations = list(
-            'Counts' = ComplexUpset::intersection_size(text = list(size = 3))
-          ),
-          width_ratio = 0.15,
-          themes = list(
-            # valid ggplot theme for elements upset will override
-            `intersections_matrix` = theme(
-              axis.title.x = element_blank(),
-              axis.title.y = element_blank()
-            )
-          )
-        )
-
-        # domain_upset <- ComplexUpset::upset(
-        #   Dwide,
-        #   intersect = setdiff(names(Dwide), "domain"),
-        #   name = "Domain intersections",
-        #   set_sizes = ComplexUpset::upset_set_size(),
-        #   base_annotations = list(
-        #     'Counts' = ComplexUpset::intersection_size(text = list(size = 3))
-        #   ),
-        #   width_ratio = 0.15
-        # )
-      } else {
-        domain_upset <- ggplot() + theme_void() + ggtitle("Domain UpSet (ComplexUpset not installed / not enough sets)")
-      }
-    } else {
-      domain_upset <- ggplot() + theme_void() + ggtitle("Domain UpSet (no domains present)")
-    }
-  } else {
-    domain_upset <- ggplot() + theme_void() + ggtitle("Domain UpSet (domain list columns not found)")
-  }
-  if (!is.na(gene_col)) {
+    
+  if ("gene_id" %in% names(DT)) {
     # Binary matrix: genes x event types
-    M <- dcast(unique(DT[!is.na(get(gene_col)) & nzchar(get(gene_col)),
-                         .(gene = as.character(get(gene_col)), event_type, present = TRUE)]),
+    M <- dcast(unique(DT[!is.na(gene_id) & nzchar(gene_id),
+                         .(gene = as.character(gene_id), event_type, present = TRUE)]),
                gene ~ event_type, value.var = "present", fill = FALSE)
     evt <- setdiff(names(M), "gene")
     if (length(evt) >= 2) {
@@ -1395,7 +1400,7 @@ integrated_event_summary <- function(
           y = "",
           title = "Event-type coordination across genes"
         ) +
-        theme_minimal() +
+        theme_minimal(base_size = 13) +
         theme(
           axis.text.x = element_text(angle = 45, hjust = 1),
           axis.title.x = element_blank(),
@@ -1410,13 +1415,14 @@ integrated_event_summary <- function(
     coord_heatmap <- ggplot() + theme_void() + ggtitle("Coordination heatmap (no gene column found)")
   }
 
-  ru <- relative_use_pre_post(pre_filter_hits, hits)
+  ru <- relative_use_pre_post(pre_filter_hits, DT)
 
   top_row    <- wrap_plots(list(p1, p2), ncol = 2)
-  top2_row <- wrap_plots(list(p3, ppi1, ppi2), ncol = 3)
-  middle_row <- wrap_plots(list(gene_upset, ru$plot), ncol = 2, widths = c(2.5, .5))
-  bottom_row <- wrap_plots(list(domain_upset, coord_heatmap), ncol = 2, widths = c(2.5, .5))
-  combined   <- (top_row / top2_row / middle_row / bottom_row) + plot_layout(heights = c(1, 1, 1, 1))
+  middle_row <- wrap_plots(list(p3, ppi1, ppi2), ncol = 3)
+  bottom_row <- wrap_plots(list(ru$plot, coord_heatmap), ncol = 2, widths = c(1, 1))
+  combined   <- (top_row / middle_row / bottom_row) +
+    plot_layout(heights = c(1.1, 1.2, 1.1))
+  combined <- combined & theme(text = element_text(size = 13))
 
   return(list(
     summaries = list(
@@ -1459,6 +1465,22 @@ relative_use_pre_post <- function(
 ){
   PRE  <- as.data.table(pre_filter_hits)
   POST <- as.data.table(hits)
+  req_pre <- c("event_id", "event_type")
+  req_post <- c("event_id", "event_type")
+  miss_pre <- setdiff(req_pre, names(PRE))
+  miss_post <- setdiff(req_post, names(POST))
+  if (length(miss_pre)) {
+    stop(
+      "relative_use_pre_post: `pre_filter_hits` missing required column(s): ",
+      paste(miss_pre, collapse = ", ")
+    )
+  }
+  if (length(miss_post)) {
+    stop(
+      "relative_use_pre_post: `hits` missing required column(s): ",
+      paste(miss_post, collapse = ", ")
+    )
+  }
 
   # --- count unique events pre ---
   pre_counts <- unique(PRE[, .(event_type = event_type,
@@ -1466,7 +1488,7 @@ relative_use_pre_post <- function(
                                  , .(n_pre = .N), by = event_type]
 
   # --- count unique events post ---
-  post_counts <- unique(POST[, .(event_type = event_type_inc,
+  post_counts <- unique(POST[, .(event_type = event_type,
                                  event_id   = event_id)])[
                                    , .(n_post = .N), by = event_type]
 
@@ -1488,7 +1510,7 @@ relative_use_pre_post <- function(
                        expand = expansion(mult = c(0.02, 0.12))) +
     labs(x = NULL, y = "Relative use (post / pre)",
          title = "Relative Use by Event Type") +
-    theme_minimal() +
+    theme_minimal(base_size = 13) +
     theme(axis.text.x = element_text(angle = 45, hjust = 1))
 
   list(summary = RU[], plot = p)
@@ -1549,22 +1571,13 @@ relative_use_pre_post <- function(
 #' @importFrom stats reorder
 #' @examples
 #' \donttest{
-#' sample_frame <- data.frame(path = c(check_extdata_dir('rawData/control_S5/'),
-#'                                     check_extdata_dir('rawData/control_S6/'),
-#'                                     check_extdata_dir('rawData/control_S7/'),
-#'                                     check_extdata_dir('rawData/control_S8/'),
-#'                                     check_extdata_dir('rawData/case_S1/'),
-#'                                     check_extdata_dir('rawData/case_S2/'),
-#'                                     check_extdata_dir('rawData/case_S3/'),
-#'                                     check_extdata_dir('rawData/case_S4/')),
-#'                            sample_name  = c("S5", "S6", "S7", "S8", "S1", "S2", "S3", "S4"),
-#'                            condition    = c("control", "control", "control", "control", "case",  "case",  "case",  "case"),
-#'                            stringsAsFactors = FALSE)
+#' ex <- load_example_data("sample_frame")
+#' sample_frame <- ex$sample_frame
 #' hit_index <- get_hitindex(sample_frame)
 #' res <- get_differential_inclusion(hit_index)
 #'
-#' annotation_df <- get_annotation(load = "test")
-#' interpro_features <- get_protein_features(c("interpro"), annotations$annotations, timeout = 600, test = TRUE)
+#' annotation_df <- load_example_data("annotation_df")$annotation_df
+#' interpro_features <- get_protein_features(c("interpro"), annotation_df$annotations, timeout = 600, test = TRUE)
 #' protein_feature_total <- get_comprehensive_annotations(list(interpro_features))
 #'
 #' exon_features <- get_exon_features(annotation_df$annotations, protein_feature_total)
@@ -1580,6 +1593,7 @@ relative_use_pre_post <- function(
 #'                      annotations = annotation_df$annotations,
 #'                      protein_features = protein_feature_total)
 #' enrichment <- get_enrichment(res$gene_id, bg$gene_id, species = 'human', 'ensembl', 'MSigDB:H')
+#' print(enrichment)
 #' }
 #' @export
 get_enrichment <- function(
@@ -1608,6 +1622,114 @@ get_enrichment <- function(
   species   <- match.arg(species)
   gene_id_type <- match.arg(gene_id_type)
   plot_type <- match.arg(plot_type)
+  sources <- unique(trimws(as.character(sources)))
+  sources <- sources[nzchar(sources)]
+  if (!length(sources)) {
+    stop("get_enrichment: `sources` must contain at least one source label.")
+  }
+
+  empty_result <- function(title = "No enriched terms at selected cutoff") {
+    empty <- data.table()
+    list(
+      results_per_source = list(),
+      results_combined   = empty,
+      results_signif     = empty,
+      plot               = ggplot2::ggplot() + ggplot2::theme_void() +
+        ggplot2::ggtitle(title)
+    )
+  }
+
+  unknown_source_labels <- sources[!grepl("^(GO:|MSigDB:)", sources)]
+  if (length(unknown_source_labels)) {
+    warning(
+      "get_enrichment: unknown source label(s) dropped: ",
+      paste(sort(unique(unknown_source_labels)), collapse = ", "),
+      ". Valid prefixes are `GO:` and `MSigDB:`."
+    )
+  }
+
+  go_requested <- sources[grepl("^GO:", sources)]
+  go_valid_onts <- intersect(sub("^GO:", "", go_requested), c("BP", "MF", "CC"))
+  go_valid_sources <- if (length(go_valid_onts)) {
+    paste0("GO:", go_valid_onts)
+  } else {
+    character()
+  }
+  go_invalid_sources <- setdiff(go_requested, go_valid_sources)
+  if (length(go_invalid_sources)) {
+    warning(
+      "get_enrichment: unknown GO source(s) dropped: ",
+      paste(sort(unique(go_invalid_sources)), collapse = ", "),
+      ". Valid GO sources are GO:BP, GO:MF, GO:CC."
+    )
+  }
+
+  msig_requested <- sources[grepl("^MSigDB:", sources)]
+  msig_valid_sources <- character()
+  msigdb_meta <- NULL
+  if (length(msig_requested)) {
+    sp_name <- if (species == "human") "Homo sapiens" else "Mus musculus"
+    mdbr <- msigdbr::msigdbr(species = sp_name)
+    cat_col <- if ("gs_collection" %in% names(mdbr)) {
+      "gs_collection"
+    } else if ("gs_cat" %in% names(mdbr)) {
+      "gs_cat"
+    } else {
+      NULL
+    }
+    subcat_col <- if ("gs_subcollection" %in% names(mdbr)) {
+      "gs_subcollection"
+    } else if ("gs_subcat" %in% names(mdbr)) {
+      "gs_subcat"
+    } else {
+      NULL
+    }
+    if (is.null(cat_col)) {
+      stop(
+        "get_enrichment: msigdbr output has no collection column ",
+        "(expected one of `gs_collection` or `gs_cat`)."
+      )
+    }
+
+    base_keys <- as.character(mdbr[[cat_col]])
+    valid_msig_keys <- unique(base_keys[!is.na(base_keys) & nzchar(base_keys)])
+    if (!is.null(subcat_col)) {
+      sub_keys <- as.character(mdbr[[subcat_col]])
+      combo_keys <- paste(base_keys, sub_keys, sep = ":")
+      combo_keys <- combo_keys[
+        !is.na(base_keys) & nzchar(base_keys) &
+          !is.na(sub_keys) & nzchar(sub_keys)
+      ]
+      valid_msig_keys <- unique(c(valid_msig_keys, combo_keys))
+    }
+
+    req_msig_keys <- sub("^MSigDB:", "", msig_requested)
+    keep_msig <- req_msig_keys %in% valid_msig_keys
+    msig_valid_sources <- msig_requested[keep_msig]
+    msig_invalid_sources <- msig_requested[!keep_msig]
+    if (length(msig_invalid_sources)) {
+      warning(
+        "get_enrichment: unknown MSigDB source(s) dropped: ",
+        paste(sort(unique(msig_invalid_sources)), collapse = ", "),
+        "."
+      )
+    }
+
+    msigdb_meta <- list(
+      mdbr = mdbr,
+      cat_col = cat_col,
+      subcat_col = subcat_col
+    )
+  }
+
+  sources <- unique(c(go_valid_sources, msig_valid_sources))
+  if (!length(sources)) {
+    warning(
+      "get_enrichment: no valid enrichment sources remain after validation. ",
+      "Returning empty results."
+    )
+    return(empty_result("No enriched terms (no valid enrichment sources)"))
+  }
 
   ## ---- 1) ID mapping helper (to ENTREZ) ----
   map_to_entrez <- function(ids) {
@@ -1620,42 +1742,129 @@ get_enrichment <- function(
                       ensembl = "ENSEMBL",
                       entrez  = "ENTREZID")
 
-    Org <- get(org_pkg)
+    Org <- getExportedValue(org_pkg, org_pkg)
     tab <- AnnotationDbi::select(Org, keys = ids, columns = "ENTREZID",
                                  keytype = keytype)
     unique(na.omit(tab$ENTREZID))
   }
 
-  fg_entrez <- map_to_entrez(foreground)
-  bg_entrez <- if (is.null(background)) NULL else map_to_entrez(background)
+  fg_entrez_mapped <- map_to_entrez(foreground)
+  bg_entrez_mapped <- if (is.null(background)) NULL else map_to_entrez(background)
+
+  if (!length(fg_entrez_mapped)) {
+    stop("get_enrichment: no foreground genes mapped to Entrez IDs. Check `gene_id_type` and ID format.")
+  }
+  if (!is.null(bg_entrez_mapped) && !length(bg_entrez_mapped)) {
+    stop("get_enrichment: no background genes mapped to Entrez IDs. Check `gene_id_type` and ID format.")
+  }
+
+  if (is.null(bg_entrez_mapped)) {
+    fg_entrez <- fg_entrez_mapped
+    bg_entrez <- NULL
+  } else {
+    bg_entrez <- unique(bg_entrez_mapped)
+    fg_entrez <- intersect(fg_entrez_mapped, bg_entrez)
+    dropped <- length(fg_entrez_mapped) - length(fg_entrez)
+    if (dropped > 0L) {
+      warning(
+        "get_enrichment: dropped ", dropped,
+        " mapped foreground genes that were absent from the mapped background universe."
+      )
+    }
+    if (!length(fg_entrez)) {
+      stop("get_enrichment: no mapped foreground genes remain after intersecting with mapped background universe.")
+    }
+  }
+
+  # Keep term-size testing valid for restricted universes.
+  eff_max_size <- as.integer(max_size)
+  if (!is.null(bg_entrez)) {
+    if (length(bg_entrez) < as.integer(min_size)) {
+      warning(
+        "get_enrichment: mapped background universe (n=", length(bg_entrez),
+        ") is smaller than min_size (", min_size, "). Returning empty results."
+      )
+      return(
+        empty_result(
+          "No enriched terms (background universe smaller than min_size)"
+        )
+      )
+    }
+    eff_max_size <- min(eff_max_size, length(bg_entrez))
+  }
+  eff_max_size <- max(eff_max_size, as.integer(min_size))
 
   ## ---- 2) Build MSigDB term2gene for selected categories ----
   make_msigdb_t2g <- function(msig_key) {
     # msig_key examples: "H", "C2:CP", "C2:CP:REACTOME", "C5:BP", etc.
-    sp_name <- if (species == "human") "Homo sapiens" else "Mus musculus"
-    mdbr <- msigdbr::msigdbr(species = sp_name)
+    mdbr <- if (!is.null(msigdb_meta)) {
+      msigdb_meta$mdbr
+    } else {
+      sp_name <- if (species == "human") "Homo sapiens" else "Mus musculus"
+      msigdbr::msigdbr(species = sp_name)
+    }
+    cat_col <- if (!is.null(msigdb_meta)) {
+      msigdb_meta$cat_col
+    } else if ("gs_collection" %in% names(mdbr)) {
+      "gs_collection"
+    } else if ("gs_cat" %in% names(mdbr)) {
+      "gs_cat"
+    } else {
+      NULL
+    }
+    subcat_col <- if (!is.null(msigdb_meta)) {
+      msigdb_meta$subcat_col
+    } else if ("gs_subcollection" %in% names(mdbr)) {
+      "gs_subcollection"
+    } else if ("gs_subcat" %in% names(mdbr)) {
+      "gs_subcat"
+    } else {
+      NULL
+    }
+    if (is.null(cat_col)) {
+      stop(
+        "get_enrichment: msigdbr output has no collection column ",
+        "(expected one of `gs_collection` or `gs_cat`)."
+      )
+    }
     parts <- strsplit(msig_key, ":", fixed = TRUE)[[1]]
     if (length(parts) == 1) {
-      md <- mdbr[mdbr$gs_cat == parts[1], ]
+      md <- mdbr[mdbr[[cat_col]] == parts[1], ]
     } else if (length(parts) == 2) {
-      md <- mdbr[mdbr$gs_cat == parts[1] & mdbr$gs_subcat == parts[2], ]
+      if (is.null(subcat_col)) return(NULL)
+      md <- mdbr[
+        mdbr[[cat_col]] == parts[1] & mdbr[[subcat_col]] == parts[2],
+      ]
     } else {
-      md <- mdbr[mdbr$gs_cat == parts[1] &
-                   mdbr$gs_subcat == paste(parts[2], parts[3], sep = ":"),
+      if (is.null(subcat_col)) return(NULL)
+      md <- mdbr[
+        mdbr[[cat_col]] == parts[1] &
+          mdbr[[subcat_col]] == paste(parts[-1], collapse = ":"),
       ]
     }
     if (!nrow(md)) return(NULL)
-    # map SYMBOL to ENTREZ using msigdbr's ENTREZID if present; fall back to mapping
-    if (!is.null(md$entrez_gene)) {
+    # Use native Entrez-like ID columns when present; otherwise map symbols.
+    if ("entrez_gene" %in% names(md)) {
       t2g <- data.table(term = md$gs_name, gene = as.character(md$entrez_gene))
-    } else if (!is.null(md$entrez_gene_id)) {
+    } else if ("entrez_gene_id" %in% names(md)) {
       t2g <- data.table(term = md$gs_name, gene = as.character(md$entrez_gene_id))
+    } else if ("ncbi_gene" %in% names(md)) {
+      t2g <- data.table(term = md$gs_name, gene = as.character(md$ncbi_gene))
+    } else if ("ncbi_gene_id" %in% names(md)) {
+      t2g <- data.table(term = md$gs_name, gene = as.character(md$ncbi_gene_id))
     } else {
-      # convert from SYMBOL
-      sym2ent <- map_to_entrez(md$gene_symbol)
+      symbol_col <- if ("gene_symbol" %in% names(md)) {
+        "gene_symbol"
+      } else if ("db_gene_symbol" %in% names(md)) {
+        "db_gene_symbol"
+      } else {
+        NULL
+      }
+      if (is.null(symbol_col)) return(NULL)
+      sym2ent <- map_to_entrez(md[[symbol_col]])
       t2g <- data.table(term = md$gs_name, gene = sym2ent)
     }
-    t2g[!is.na(gene)]
+    t2g[!is.na(gene) & nzchar(gene) & gene != "NA"]
   }
 
   ## ---- 3) Run enrichments per source ----
@@ -1666,8 +1875,8 @@ get_enrichment <- function(
 
     ontos <- sub("^GO:","", sources[grepl("^GO:", sources)], fixed = FALSE)
     ontos <- intersect(ontos, c("BP","MF","CC"))
-    Org <- if (species == "human") "org.Hs.eg.db" else "org.Mm.eg.db"
-    OrgPkg <- get(Org)
+    org_pkg <- if (species == "human") "org.Hs.eg.db" else "org.Mm.eg.db"
+    OrgPkg <- getExportedValue(org_pkg, org_pkg)
     for (ont in ontos) {
       ego <- clusterProfiler::enrichGO(
         gene          = fg_entrez,
@@ -1679,7 +1888,7 @@ get_enrichment <- function(
         pvalueCutoff  = 1,
         qvalueCutoff  = 1,
         minGSSize     = min_size,
-        maxGSSize     = max_size,
+        maxGSSize     = eff_max_size,
         readable      = TRUE
       )
       if (simplify_go && length(ego) > 0) {
@@ -1687,8 +1896,10 @@ get_enrichment <- function(
       }
       if (length(ego) > 0 && nrow(ego@result)) {
         out <- as.data.table(ego@result)
+        if ("pvalue" %in% names(out)) out <- out[is.finite(pvalue)]
+        if ("p.adjust" %in% names(out)) out <- out[is.finite(p.adjust)]
         out[, source := paste0("GO:", ont)]
-        res_list[[paste0("GO_", ont)]] <- out
+        if (nrow(out)) res_list[[paste0("GO_", ont)]] <- out
       }
     }
   }
@@ -1706,12 +1917,14 @@ get_enrichment <- function(
           pAdjustMethod = "BH",
           pvalueCutoff  = 1,
           minGSSize     = min_size,
-          maxGSSize     = max_size
+          maxGSSize     = eff_max_size
         )
         if (length(er) > 0 && nrow(er@result)) {
           out <- as.data.table(er@result)
+          if ("pvalue" %in% names(out)) out <- out[is.finite(pvalue)]
+          if ("p.adjust" %in% names(out)) out <- out[is.finite(p.adjust)]
           out[, source := paste0("MSigDB:", k)]
-          res_list[[paste0("MSigDB_", gsub("[:]", "_", k))]] <- out
+          if (nrow(out)) res_list[[paste0("MSigDB_", gsub("[:]", "_", k))]] <- out
         }
       }
     }
@@ -1776,33 +1989,24 @@ get_enrichment <- function(
 #'
 #' Return genes whose inclusion/exclusion isoforms show unique protein domain gain or loss.
 #'
-#' @param hits Data frame from `get_domains()`.
+#' @param hits Data frame with domain-annotation columns.
 #'
 #' @return Character vector of gene IDs.
 #' @export
 #'
 #' @examples
 #' \donttest{
-#' sample_frame <- data.frame(path = c(check_extdata_dir('rawData/control_S5/'),
-#'                                     check_extdata_dir('rawData/control_S6/'),
-#'                                     check_extdata_dir('rawData/control_S7/'),
-#'                                     check_extdata_dir('rawData/control_S8/'),
-#'                                     check_extdata_dir('rawData/case_S1/'),
-#'                                     check_extdata_dir('rawData/case_S2/'),
-#'                                     check_extdata_dir('rawData/case_S3/'),
-#'                                     check_extdata_dir('rawData/case_S4/')),
-#'                            sample_name  = c("S5", "S6", "S7", "S8", "S1", "S2", "S3", "S4"),
-#'                            condition    = c("control", "control", "control", "control", "case",  "case",  "case",  "case"),
-#'                            stringsAsFactors = FALSE)
+#' ex <- load_example_data("sample_frame")
+#' sample_frame <- ex$sample_frame
 #' hit_index <- get_hitindex(sample_frame)
 #' res <- get_differential_inclusion(hit_index)
-#' annotation_df <- get_annotation(load = "test")
+#' annotation_df <- load_example_data("annotation_df")$annotation_df
 #' matched <- get_matched_events_chunked(res, annotation_df$annotations, chunk_size = 2000)
 #' x_seq <- attach_sequences(matched, annotation_df$sequences)
 #' pairs <- get_pairs(x_seq, source="multi")
 #' seq_compare <-compare_sequence_frame(pairs, annotation_df$annotations)
 #' annotation_df <- get_annotation(load = 'test')
-#' interpro_features <- get_protein_features(c("interpro"), annotations$annotations, timeout = 600, test = TRUE)
+#' interpro_features <- get_protein_features(c("interpro"), annotation_df$annotations, timeout = 600, test = TRUE)
 #' protein_feature_total <- get_comprehensive_annotations(list(interpro_features))
 #'
 #' exon_features <- get_exon_features(annotation_df$annotations, protein_feature_total)
@@ -1814,9 +2018,26 @@ get_enrichment <- function(
 #'                      annotations = annotation_df$annotations,
 #'                      protein_features = protein_feature_total)
 #' enrichment <- get_enrichment(get_domain_gene_for_enrichment(hits_domain), bg$gene_id, species = 'human', 'ensembl', 'MSigDB:H')
+#' print(enrichment)
 #' }
 get_domain_gene_for_enrichment <- function(hits) {
-  enriched_genes <- hits$gene_id_inc[hits$diff_n > 0]
+  .spi_in <- .resolve_splice_input(hits, what = "paired_hits")
+  DT <- data.table::as.data.table(.spi_in$dt)
+
+  req <- c("gene_id", "diff_n")
+  miss <- setdiff(req, names(DT))
+  if (length(miss)) {
+    stop(
+      "get_domain_gene_for_enrichment: missing required column(s): ",
+      paste(miss, collapse = ", ")
+    )
+  }
+
+  enriched_genes <- DT[
+    is.finite(diff_n) & diff_n > 0 &
+      !is.na(gene_id) & nzchar(as.character(gene_id)),
+    unique(as.character(gene_id))
+  ]
   return(enriched_genes)
 }
 
@@ -1832,47 +2053,49 @@ get_domain_gene_for_enrichment <- function(hits) {
 #'
 #' @examples
 #' \donttest{
-#' sample_frame <- data.frame(path = c(check_extdata_dir('rawData/control_S5/'),
-#'                                     check_extdata_dir('rawData/control_S6/'),
-#'                                     check_extdata_dir('rawData/control_S7/'),
-#'                                     check_extdata_dir('rawData/control_S8/'),
-#'                                     check_extdata_dir('rawData/case_S1/'),
-#'                                     check_extdata_dir('rawData/case_S2/'),
-#'                                     check_extdata_dir('rawData/case_S3/'),
-#'                                     check_extdata_dir('rawData/case_S4/')),
-#'                            sample_name  = c("S5", "S6", "S7", "S8", "S1", "S2", "S3", "S4"),
-#'                            condition    = c("control", "control", "control", "control", "case",  "case",  "case",  "case"),
-#'                            stringsAsFactors = FALSE)
+#' ex <- load_example_data("sample_frame")
+#' sample_frame <- ex$sample_frame
 #' hit_index <- get_hitindex(sample_frame)
 #' res <- get_differential_inclusion(hit_index)
-#' annotation_df <- get_annotation(load = "test")
+#' annotation_df <- load_example_data("annotation_df")$annotation_df
 #' matched <- get_matched_events_chunked(res, annotation_df$annotations, chunk_size = 2000)
 #' x_seq <- attach_sequences(matched, annotation_df$sequences)
 #' pairs <- get_pairs(x_seq, source="multi")
 #' seq_compare <-compare_sequence_frame(pairs, annotation_df$annotations)
 #' annotation_df <- get_annotation(load = 'test')
-#' interpro_features <- get_protein_features(c("interpro"), annotations$annotations, timeout = 600, test = TRUE)
+#' interpro_features <- get_protein_features(c("interpro"), annotation_df$annotations, timeout = 600, test = TRUE)
 #' protein_feature_total <- get_comprehensive_annotations(list(interpro_features))
 #'
 #' exon_features <- get_exon_features(annotation_df$annotations, protein_feature_total)
 #'
 #' hits_domain <- get_domains(seq_compare, exon_features)
-#' ppidm <- get_ppidm(test=TRUE)
-#'
-#' ppi <- get_isoform_interactions(protein_feature_total[ensembl_transcript_id %in%
-#'                                                         annotation_df$annotations[, unique(transcript_id)]],
-#'                                 ppidm, save = FALSE, load_dir = '/projectnb2/evolution/zwakefield/proteinImpacts/', init = TRUE)
-#'
-#'
-#' hits_final <- get_ppi_switches(hits_domain, ppi)
+#' ppi <- get_ppi_interactions()             
+#' hits_final <- get_ppi_switches(hits_domain, ppi, protein_feature_total)
 #' bg <- get_background(source = "hit_index",
 #'                      input = sample_frame,
 #'                      annotations = annotation_df$annotations,
 #'                      protein_features = protein_feature_total)
 #' enrichment <- get_enrichment(get_ppi_gene_enrichment(hits_final), bg$gene_id, species = 'human', 'ensembl', 'MSigDB:H')
+#' print(enrichment)
 #' }
 get_ppi_gene_enrichment <- function(hits) {
-  ppi_genes <- hits$gene_id_inc[hits$n_ppi > 0]
+  .spi_in <- .resolve_splice_input(hits, what = "paired_hits")
+  DT <- data.table::as.data.table(.spi_in$dt)
+
+  req <- c("gene_id", "n_ppi")
+  miss <- setdiff(req, names(DT))
+  if (length(miss)) {
+    stop(
+      "get_ppi_gene_enrichment: missing required column(s): ",
+      paste(miss, collapse = ", ")
+    )
+  }
+
+  ppi_genes <- DT[
+    is.finite(n_ppi) & n_ppi > 0 &
+      !is.na(gene_id) & nzchar(as.character(gene_id)),
+    unique(as.character(gene_id))
+  ]
   return(ppi_genes)
 }
 
@@ -1891,22 +2114,13 @@ get_ppi_gene_enrichment <- function(hits) {
 #'
 #' @examples
 #' \donttest{
-#' sample_frame <- data.frame(path = c(check_extdata_dir('rawData/control_S5/'),
-#'                                     check_extdata_dir('rawData/control_S6/'),
-#'                                     check_extdata_dir('rawData/control_S7/'),
-#'                                     check_extdata_dir('rawData/control_S8/'),
-#'                                     check_extdata_dir('rawData/case_S1/'),
-#'                                     check_extdata_dir('rawData/case_S2/'),
-#'                                     check_extdata_dir('rawData/case_S3/'),
-#'                                     check_extdata_dir('rawData/case_S4/')),
-#'                            sample_name  = c("S5", "S6", "S7", "S8", "S1", "S2", "S3", "S4"),
-#'                            condition    = c("control", "control", "control", "control", "case",  "case",  "case",  "case"),
-#'                            stringsAsFactors = FALSE)
+#' ex <- load_example_data("sample_frame")
+#' sample_frame <- ex$sample_frame
 #' hit_index <- get_hitindex(sample_frame)
 #' res <- get_differential_inclusion(hit_index)
 #'
-#' annotation_df <- get_annotation(load = "test")
-#' interpro_features <- get_protein_features(c("interpro"), annotations$annotations, timeout = 600, test = TRUE)
+#' annotation_df <- load_example_data("annotation_df")$annotation_df
+#' interpro_features <- get_protein_features(c("interpro"), annotation_df$annotations, timeout = 600, test = TRUE)
 #' protein_feature_total <- get_comprehensive_annotations(list(interpro_features))
 #'
 #' exon_features <- get_exon_features(annotation_df$annotations, protein_feature_total)
@@ -1922,26 +2136,97 @@ get_ppi_gene_enrichment <- function(hits) {
 #'                      annotations = annotation_df$annotations,
 #'                      protein_features = protein_feature_total)
 #' enrichment <- get_enrichment(get_di_gene_enrichment(res, .05, .1), bg$gene_id, species = 'human', 'ensembl', 'MSigDB:H')
+#' print(enrichment)
 #' }
 get_di_gene_enrichment <- function(hits, padj_threshold, delta_psi_threshold) {
-  di_genes <- hits$gene_id[hits$padj < padj_threshold & abs(hits$delta_psi) > delta_psi_threshold]
+  .spi_in <- .resolve_splice_input(hits, what = "di_events")
+  DT <- data.table::as.data.table(.spi_in$dt)
+
+  req <- c("gene_id", "padj", "delta_psi")
+  miss <- setdiff(req, names(DT))
+  if (length(miss)) {
+    stop(
+      "get_di_gene_enrichment: missing required column(s): ",
+      paste(miss, collapse = ", ")
+    )
+  }
+
+  di_genes <- DT[
+    is.finite(padj) & is.finite(delta_psi) &
+      padj < padj_threshold & abs(delta_psi) > delta_psi_threshold &
+      !is.na(gene_id) & nzchar(as.character(gene_id)),
+    unique(as.character(gene_id))
+  ]
+  return(di_genes)
 }
 
+#' Unified gene selector for enrichment foregrounds
+#'
+#' Selects a foreground gene vector for enrichment from DI results (`res`) or
+#' hits-final-like tables (`hits`) using a single wrapper.
+#'
+#' - `mode = "di"` uses differential inclusion columns (`gene_id`, `padj`, `delta_psi`)
+#' - `mode = "ppi"` uses hits-final-like columns (`gene_id`, `n_ppi`)
+#' - `mode = "domain"` uses hits-final-like columns (`gene_id`, `diff_n`)
+#'
+#' Inputs can be a `data.table`/`data.frame` or a `SpliceImpactResult` S4 object.
+#'
+#' @param mode One of `"di"`, `"ppi"`, `"domain"`.
+#' @param x Optional generic input. For `mode="di"`, this should be `res`-like;
+#'   for `mode="ppi"`/`"domain"`, this should be hits-final-like. If `x` is S4,
+#'   the appropriate slot is used automatically.
+#' @param res Optional DI table (or S4) used when `mode="di"`. If provided, it
+#'   is preferred over `x`.
+#' @param hits Optional hits-final-like table (or S4) used when
+#'   `mode="ppi"`/`"domain"`. If provided, it is preferred over `x`.
+#' @param padj_threshold FDR cutoff used only for `mode="di"`.
+#' @param delta_psi_threshold Absolute delta-psi cutoff used only for
+#'   `mode="di"`.
+#'
+#' @return Character vector of unique gene IDs.
+#' @examples
+#' res <- data.table::data.table(
+#'   gene_id = c("ENSG000001", "ENSG000001", "ENSG000002"),
+#'   padj = c(0.01, 0.20, 0.03),
+#'   delta_psi = c(0.25, 0.05, -0.30)
+#' )
+#' hits <- data.table::data.table(
+#'   gene_id = c("ENSG000001", "ENSG000002", "ENSG000003"),
+#'   n_ppi = c(1L, 0L, 2L),
+#'   diff_n = c(0L, 1L, 2L)
+#' )
+#' get_gene_enrichment(mode = "di", res = res)
+#' get_gene_enrichment(mode = "ppi", hits = hits)
+#' get_gene_enrichment(mode = "domain", hits = hits)
+#'
+#' obj <- as_splice_impact_result(res = res, hits_final = hits)
+#' get_gene_enrichment(mode = "ppi", x = obj)
+#' @export
+get_gene_enrichment <- function(
+    mode = c("di", "ppi", "domain"),
+    x = NULL,
+    res = NULL,
+    hits = NULL,
+    padj_threshold = 0.05,
+    delta_psi_threshold = 0.1
+) {
+  mode <- match.arg(mode)
 
+  if (identical(mode, "di")) {
+    src <- if (!is.null(res)) res else x
+    if (is.null(src)) {
+      stop("get_gene_enrichment(mode='di'): provide `res` or `x`.")
+    }
+    return(get_di_gene_enrichment(src, padj_threshold, delta_psi_threshold))
+  }
 
+  src <- if (!is.null(hits)) hits else x
+  if (is.null(src)) {
+    stop("get_gene_enrichment(mode='", mode, "'): provide `hits` or `x`.")
+  }
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
+  if (identical(mode, "ppi")) {
+    return(get_ppi_gene_enrichment(src))
+  }
+  return(get_domain_gene_for_enrichment(src))
+}

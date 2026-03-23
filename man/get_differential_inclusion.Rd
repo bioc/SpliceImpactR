@@ -8,16 +8,19 @@ get_differential_inclusion(
   DT,
   min_total_reads = 10L,
   minimum_proportion_containing_event = 0.5,
+  terminal_fill = "event_max",
   cooks_cutoff = "Inf",
   adjust_method = "fdr",
   verbose = TRUE,
   parallel_glm = TRUE,
   chunk_size_glm = 1000,
-  cores_glm = 1
+  BPPARAM = BiocParallel::SerialParam(),
+  return_class = c("auto", "data.table", "S4")
 )
 }
 \arguments{
-\item{DT}{A `data.frame` or `data.table` containing at least the columns
+\item{DT}{A `data.frame`, `data.table`, or `SpliceImpactResult` containing
+at least the columns
 `event_type`, `gene_id`, `chr`, `inc`, `exclusion_reads`,
 `inclusion_reads`, `condition`, and `sample`.}
 
@@ -27,6 +30,21 @@ required for inclusion (default `10`).}
 \item{minimum_proportion_containing_event}{Numeric in `[0,1]`. Minimum
 fraction of samples per condition that must contain the event
 (default `0.5`).}
+
+\item{terminal_fill}{Character or numeric. Strategy for completing AFE/ALE
+events that are missing in a given sample. Choose one of:
+\describe{
+  \item{"none"}{Do not add missing terminal sites.}
+  \item{"gene_max"}{Fill missing sites with zero counts and set `total`
+    to the maximum observed within each `gene_id`/`sample`/`condition`
+    group.}
+  \item{"event_max"}{Fill missing sites with zero counts and set `total`
+    to the maximum observed within each `event_id`/`sample`/`condition`
+    group.}
+  \item{"zero"}{Fill missing sites with zero counts and `total = 0`.}
+}
+Alternatively, supply a single numeric value to use as the `total` for
+all filled rows. Defaults to `"gene_max"`.}
 
 \item{cooks_cutoff}{Character or numeric. Cook's distance cutoff:
 `"4/n"`, `"Inf"`, `"none"`, or a numeric value.}
@@ -42,10 +60,16 @@ to [stats::p.adjust()] (default `"fdr"`).}
 \item{chunk_size_glm}{Integer. Number of sites per parallel chunk
 (default `1000`).}
 
-\item{cores_glm}{Integer. Number of parallel workers (default `1`).}
+\item{BPPARAM}{A [BiocParallel::BiocParallelParam-class] object used when
+`parallel_glm = TRUE`. Default is [BiocParallel::SerialParam()].}
+
+\item{return_class}{Character. Output mode: `"data.table"`, `"S4"`, or
+`"auto"` (default). In `auto`, S4 input returns an updated S4 object;
+otherwise a `data.table` is returned.}
 }
 \value{
-A `data.table` with one row per site containing:
+If `return_class` resolves to `"data.table"`, a `data.table` with
+one row per site containing:
   \itemize{
     \item Metadata columns (`site_id`, `event_type`, `event_id`, `gene_id`, ...)
     \item Sample counts (`n_samples`, `n_control`, `n_case`)
@@ -63,22 +87,16 @@ using parallel processing.
 }
 \details{
 The function filters out low-coverage and low-presence events,
-fills AFE/ALE sites with zero counts where necessary,
+optionally fills AFE/ALE sites with zero counts where necessary,
 and then applies site-level GLMs. Parallelization uses
 [BiocParallel] back-ends for reproducibility across platforms.
+To run in parallel, supply `BPPARAM` (for example
+[BiocParallel::MulticoreParam()] on Linux/macOS or
+[BiocParallel::SnowParam()] on Windows).
 }
 \examples{
-sample_frame <- data.frame(path = c(check_extdata_dir('rawData/control_S5/'),
-                                    check_extdata_dir('rawData/control_S6/'),
-                                    check_extdata_dir('rawData/control_S7/'),
-                                    check_extdata_dir('rawData/control_S8/'),
-                                    check_extdata_dir('rawData/case_S1/'),
-                                    check_extdata_dir('rawData/case_S2/'),
-                                    check_extdata_dir('rawData/case_S3/'),
-                                    check_extdata_dir('rawData/case_S4/')),
-                           sample_name  = c("S5", "S6", "S7", "S8", "S1", "S2", "S3", "S4"),
-                           condition    = c("control", "control", "control", "control", "case",  "case",  "case",  "case"),
-                           stringsAsFactors = FALSE)
+ex <- load_example_data("sample_frame")
+sample_frame <- ex$sample_frame
 hit_index <- get_hitindex(sample_frame)
 res <- get_differential_inclusion(hit_index)
 head(res)

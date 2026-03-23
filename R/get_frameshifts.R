@@ -535,8 +535,8 @@ build_coding_index <- function(ann) {
 #'
 #' @param hits `data.frame` or `data.table` containing splicing event metadata,
 #'   typically output from [compare_sequences_alignment()]. Must include
-#'   columns such as `event_type_inc`, `transcript_id_inc`, `transcript_id_exc`,
-#'   `exons_inc`, `exons_exc`, and `pc_class`.
+#'   columns such as `event_type`, `transcript_id_case`, `transcript_id_control`,
+#'   `exons_case`, `exons_control`, and `pc_class`.
 #' @param annotations from get_annotations (annotations)
 #' @param allow_ale_fs Logical (default `FALSE`).
 #'   Whether to allow ALE/HLE events to be considered frameshifting.
@@ -573,11 +573,11 @@ compare_frames <- function(hits,
   res <- H[, {
     if (pc_class == "protein_coding") {
 
-      et <- as.character(event_type_inc)
-      tx1 <- as.character(transcript_id_inc)
-      tx2 <- as.character(transcript_id_exc)
-      e1  <- .parse_exon_list(as.character(exons_inc))
-      e2  <- .parse_exon_list(as.character(exons_exc))
+      et <- as.character(event_type)
+      tx1 <- as.character(transcript_id_case)
+      tx2 <- as.character(transcript_id_control)
+      e1  <- .parse_exon_list(as.character(exons_case))
+      e2  <- .parse_exon_list(as.character(exons_control))
       if (et %chin% c("AFE","HFE","ALE","HLE")) {
         mode <- if (et %chin% c("AFE","HFE")) "AFE" else "ALE"
         pick <- .pick_terminal_overlap(E, tx1, tx2, mode)
@@ -591,9 +591,13 @@ compare_frames <- function(hits,
 
       frame_call <- "PartialMatch"
       rescue <- "noRescue"
+      
+      e1_inE <- sum(E$exon_id %in% e1 & E$transcript_id %in% tx1) > 0
+      e2_inE <- sum(E$exon_id %in% e2 & E$transcript_id %in%  tx2) > 0
+      
       if (length(e1) == 1L && length(e2) == 1L &&
           !is.na(e1) && !is.na(e2) &&
-          e1 %in% E$exon_id && e2 %in% E$exon_id) {
+          e1_inE && e2_inE) {
       # if (e1 %in% E$exon_id & e2 %in% E$exon_id) {
         cmp <- switch(et,
                       "A3SS" = .compare_at_overlap_start(E, tx1, tx2, e1, e2),          # first base of overlap
@@ -641,7 +645,7 @@ compare_frames <- function(hits,
   # stitch back to input
   out <- cbind(H, res[, .(frame_call, rescue, frame_check_exon1, frame_check_exon2)])
   if (allow_ale_fs == FALSE) {
-    out[event_type_exc %chin% c("ALE", "HLE") | event_type_inc %chin% c("ALE", "HLE"), `:=` (frame_call = "PartialMatch",
+    out[event_type %chin% c("ALE", "HLE"), `:=` (frame_call = "PartialMatch",
                                                                                              rescue = "noRescue")]
   }
   print(paste0("[INFO] ", sum(out$frame_call[!is.na(out$frame_call)] == "FrameShift") ," frameshifts (",
@@ -669,13 +673,17 @@ compare_frames <- function(hits,
 #' 3. `"Rescue"` - frame restored downstream.
 #' 4. Otherwise, inherited from `pc_class`.
 #'
-#' @param complete_hits `data.frame` or `data.table` containing complete event
-#'   information for inclusion/exclusion transcript pairs, typically from
-#'   [get_pairs()] or similar.
+#' @param complete_hits `data.frame`, `data.table`, or `SpliceImpactResult`
+#'   containing complete event information for inclusion/exclusion transcript
+#'   pairs, typically from [get_pairs()] or similar.
 #' @param ann Annotation object (output of [get_annotation()]) used for both
 #'   sequence alignment and coding index construction.
+#' @param return_class Character. Output mode: `"data.table"`, `"S4"`, or
+#'   `"auto"` (default). In `auto`, S4 input returns updated S4 output.
 #'
-#' @return A `data.table` containing all columns from `complete_hits`, plus:
+#' @return A `data.table` (or updated `SpliceImpactResult` when
+#' `return_class` resolves to S4) containing all columns from
+#' `complete_hits`, plus:
 #' \describe{
 #'   \item{frame_call}{Result from [compare_frames()].}
 #'   \item{rescue}{Rescue classification.}
@@ -686,34 +694,30 @@ compare_frames <- function(hits,
 #' @seealso [compare_frames()], [compare_sequences_alignment()]
 #'
 #' @examples
-#' sample_frame <- data.frame(path = c(check_extdata_dir('rawData/control_S5/'),
-#'                                     check_extdata_dir('rawData/control_S6/'),
-#'                                     check_extdata_dir('rawData/control_S7/'),
-#'                                     check_extdata_dir('rawData/control_S8/'),
-#'                                     check_extdata_dir('rawData/case_S1/'),
-#'                                     check_extdata_dir('rawData/case_S2/'),
-#'                                     check_extdata_dir('rawData/case_S3/'),
-#'                                     check_extdata_dir('rawData/case_S4/')),
-#'                            sample_name  = c("S5", "S6", "S7", "S8", "S1", "S2", "S3", "S4"),
-#'                            condition    = c("control", "control", "control", "control", "case",  "case",  "case",  "case"),
-#'                            stringsAsFactors = FALSE)
+#' ex <- load_example_data("sample_frame")
+#' sample_frame <- ex$sample_frame
 #' hit_index <- get_hitindex(sample_frame)
 #' res <- get_differential_inclusion(hit_index)
-#' annots <- get_annotation(load = "test")
+#' annots <- load_example_data("annotation_df")$annotation_df
 #' matched <- get_matched_events_chunked(res, annots$annotations, chunk_size = 2000)
 #' x_seq <- attach_sequences(matched, annots$sequences)
 #' pairs <- get_pairs(x_seq, source="multi")
 #' seq_compare <-compare_sequence_frame(pairs, annots$annotations)
+#' print(seq_compare)
 #' @export
-compare_sequence_frame <- function(complete_hits, ann) {
-  hits_compare_sequence <- compare_sequences_alignment(hits = complete_hits, annotations = ann, include_sequences = TRUE, verbose = TRUE)
+compare_sequence_frame <- function(complete_hits, ann, return_class = c("auto", "data.table", "S4")) {
+  return_class <- match.arg(return_class)
+  .spi_in <- .resolve_splice_input(complete_hits, what = "paired_hits")
+  .spi_obj <- .spi_in$obj
+  hits_in <- data.table::as.data.table(.spi_in$dt)
+  hits_compare_sequence <- compare_sequences_alignment(hits = hits_in, annotations = ann, include_sequences = TRUE, verbose = TRUE)
   hits_compare_frame <- compare_frames(hits = hits_compare_sequence, annotations = ann,allow_ale_fs = FALSE)
 
   # summarize classifications for plotting
   hits_compare_frame[, summary_classification := pc_class]
   hits_compare_frame[frame_call == 'FrameShift', summary_classification := 'FrameShift']
   hits_compare_frame[rescue != 'noRescue' & !is.na(rescue), summary_classification := 'Rescue']
-  hits_compare_frame[protein_seq_exc == protein_seq_inc & !is.na(protein_seq_inc), summary_classification := "Match"]
+  hits_compare_frame[protein_seq_control == protein_seq_case & !is.na(protein_seq_case), summary_classification := "Match"]
 
-  return(hits_compare_frame)
+  return(.return_splice_output(hits_compare_frame, obj = .spi_obj, what = "paired_hits", return_class = return_class))
 }

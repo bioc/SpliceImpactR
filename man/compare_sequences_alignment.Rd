@@ -14,8 +14,8 @@ compare_sequences_alignment(
 \arguments{
 \item{hits}{A \link[data.table]{data.table} or data.frame containing
 isoform pairs. Must include columns:
-\code{transcript_seq_inc}, \code{transcript_seq_exc},
-\code{protein_seq_inc}, and \code{protein_seq_exc}. From prior analysis.}
+\code{transcript_seq_case}, \code{transcript_seq_control},
+\code{protein_seq_case}, and \code{protein_seq_control}. From prior analysis.}
 
 \item{annotations}{output from get_annotations (annotations)}
 
@@ -29,8 +29,8 @@ A \link[data.table]{data.table} with added columns describing
   sequence length, coding length, and alignment similarity metrics, including:
   \itemize{
     \item \code{pc_class}: protein-coding status ("protein_coding", "onePC", "noPC")
-    \item \code{prot_len_inc/exc}: protein sequence lengths
-    \item \code{tx_len_inc/exc}: transcript sequence lengths
+    \item \code{prot_len_case/control}: protein sequence lengths
+    \item \code{tx_len_case/control}: transcript sequence lengths
     \item \code{exon_cds_len_*}, \code{exon_len_*}: summed exon/CDS lengths
     \item \code{dna_pid}, \code{dna_score}, \code{prot_pid}, \code{prot_score}: alignment metrics
   }
@@ -47,23 +47,15 @@ exon length summarization (\code{.sum_exon_lengths()}),
 and protein-coding classification (\code{.pc_class()}).
 }
 \examples{
-sample_frame <- data.frame(path = c(check_extdata_dir('rawData/control_S5/'),
-                                    check_extdata_dir('rawData/control_S6/'),
-                                    check_extdata_dir('rawData/control_S7/'),
-                                    check_extdata_dir('rawData/control_S8/'),
-                                    check_extdata_dir('rawData/case_S1/'),
-                                    check_extdata_dir('rawData/case_S2/'),
-                                    check_extdata_dir('rawData/case_S3/'),
-                                    check_extdata_dir('rawData/case_S4/')),
-                           sample_name  = c("S5", "S6", "S7", "S8", "S1", "S2", "S3", "S4"),
-                           condition    = c("control", "control", "control", "control", "case",  "case",  "case",  "case"),
-                           stringsAsFactors = FALSE)
+ex <- load_example_data("sample_frame")
+sample_frame <- ex$sample_frame
 hit_index <- get_hitindex(sample_frame)
 res <- get_differential_inclusion(hit_index)
-annots <- get_annotation(load = "test")
+annots <- load_example_data("annotation_df")$annotation_df
 matched <- get_matched_events_chunked(res, annots$annotations, chunk_size = 2000)
 x_seq <- attach_sequences(matched, annots$sequences)
 pairs <- get_pairs(x_seq, source="multi")
 aligned <- compare_sequences_alignment(pairs, annots$annotations)
+print(aligned)
 
 }

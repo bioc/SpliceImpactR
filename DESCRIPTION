@@ -2,7 +2,7 @@ Package: SpliceImpactR
 Type: Package
 Title: An R package to identify functional impacts due to alternative RNA 
     processing events 
-Version: 0.99.2
+Version: 0.99.3
 Authors@R: c(person(given="Zachary", family="Wakefield",
     email = "zachpw@bu.edu",
     role = c("cre", "aut"),
@@ -25,6 +25,7 @@ Imports:
     BiocParallel,
     Biostrings,
     GenomicRanges,
+    SummarizedExperiment,
     biomaRt,
     IRanges,
     PFAM.db,
@@ -41,13 +42,12 @@ Imports:
     utils,
     magrittr,
     methods,
-    ComplexUpset,
-    S4Vectors,
-    methods
+    S4Vectors
 RoxygenNote: 7.3.3
 biocViews: AlternativeSplicing, DifferentialSplicing, StatisticalMethod, 
     Alignment
 Suggests: 
+    devtools,
     testthat (>= 3.0.0),
     knitr,
     rmarkdown,
@@ -63,3 +63,4 @@ Suggests:
     org.Mm.eg.db
 VignetteBuilder: knitr
 Config/testthat/edition: 3
+BugReports: https://github.com/fiszbein-lab/SpliceImpactR/issues

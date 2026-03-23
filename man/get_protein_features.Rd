@@ -5,14 +5,21 @@
 \title{External function to fetch protein features from biomaRt}
 \usage{
 get_protein_features(
-  biomaRt_databases = c("interpro", "mobidblite", "seg", "ncoils", "tmhmm", "signalp"),
+  biomaRt_databases = c("interpro", "mobidblite", "seg", "ncoils", "tmhmm", "signalp",
+    "elm", "gene3d", "pfam"),
   gtf_df,
+  sequences = NULL,
   load_path = NULL,
   save_path = NULL,
+  base_dir = NULL,
+  use_cache = TRUE,
+  force_refresh = FALSE,
   timeout = 600,
-  species = c("human", "mouse")[1],
-  release = c(109, 115)[1],
-  test = FALSE
+  ensembl_mirror = NULL,
+  species = c("human", "mouse"),
+  release = 109,
+  test = FALSE,
+  combine_overlaps = FALSE
 )
 }
 \arguments{
@@ -21,22 +28,42 @@ to interpro, mobidblite, seg, ncoils, tmhmm, signalp}
 
 \item{gtf_df}{annotations from get_annotation()}
 
+\item{sequences}{only necessary if loading SLiMs from elm get_annotation() 
+(default \code{"sequences"}) output}
+
 \item{load_path}{path to load prior protein features from}
 
 \item{save_path}{path to save prior protein features from}
 
+\item{base_dir}{Optional cache root. If `NULL` (default), uses
+package cache under `tools::R_user_dir("SpliceImpactR", "cache")`.}
+
+\item{use_cache}{Logical; if `TRUE` (default), cache and reuse final
+`get_protein_features()` outputs through BiocFileCache.}
+
+\item{force_refresh}{Logical; if `TRUE`, recompute and overwrite any
+existing BiocFileCache entry for this parameter/input signature.}
+
 \item{timeout}{ability to extend timeout if biomaRt is not cooperating}
+
+\item{ensembl_mirror}{Optional Ensembl mirror to try first for BioMart
+connections; one of `"useast"`, `"www"`, or `"asia"`. If `NULL`,
+mirrors are tried in fallback order when `release = NULL`. If a
+specific `release` is provided, biomaRt ignores mirror selection.}
 
 \item{species}{Character string giving the Ensembl BioMart
 dataset (default \code{"human"}). For mouse, use
 \code{"mouse"}.}
 
-\item{release}{release version from ensemble associated with the gencode
-version provided in the get_annotation (This can be found in gencode, for
-example in human: https://www.gencodegenes.org/human/releases.html)
-example in mouse: https://www.gencodegenes.org/mouse/releases.html)}
+\item{release}{Release version from Ensembl associated with the GENCODE
+version used in [get_annotation()]. See the GENCODE human/mouse release
+listings to map GENCODE and Ensembl versions.}
 
-\item{test}{Logical; bool for whether to load from reduced test set}
+\item{test}{Logical; bool for whether to load from reduced test set.}
+
+\item{combine_overlaps}{simplifies protein feature output and combines
+protein features with the same ID and overlapping coords. Sometimes not 
+desireable}
 }
 \value{
 A `data.table` with one row per protein feature and transcript coupling
@@ -49,6 +76,7 @@ of the same domain being called as the same in domain identification and
 enrichment.
 }
 \examples{
-annotation_df <- get_annotation(load = "test")
-interpro_features <- get_protein_features(c("interpro"), annotation_df$annotations, timeout = 600, test = TRUE)
+annotation_df <- load_example_data("annotation_df")$annotation_df
+interpro_features <- get_protein_features(c("interpro"), annotation_df$annotations, annotation_df$sequences, timeout = 600, test = TRUE)
+print(interpro_features)
 }
